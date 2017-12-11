@@ -1,0 +1,153 @@
+---
+title: "tweet data collection"
+author: "Mehdi Khan"
+date: "December 11, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load libraries:
+```{r}
+suppressWarnings(suppressMessages(library(twitteR)))
+suppressWarnings(suppressMessages(library(RCurl)))
+suppressWarnings(suppressMessages(library(RJSONIO)))
+suppressWarnings(suppressMessages(library(stringr)))
+suppressWarnings(suppressMessages(library(rtweet)))
+suppressWarnings(suppressMessages(library(dismo)))
+suppressWarnings(suppressMessages(library(maps)))
+suppressWarnings(suppressMessages(library(ggplot2)))
+suppressWarnings(suppressMessages(library(XML)))
+suppressWarnings(suppressMessages(library(dplyr)))
+suppressWarnings(suppressMessages(library(aws.s3)))
+suppressWarnings(suppressMessages(library(aws.signature)))
+suppressWarnings(suppressMessages(library(tm)))
+suppressWarnings(suppressMessages(library(qdap)))
+suppressWarnings(suppressMessages(library(SnowballC)))
+suppressWarnings(suppressMessages(library(wordcloud)))
+suppressWarnings(suppressMessages(library(topicmodels)))
+suppressWarnings(suppressMessages(library(data.table)))
+suppressWarnings(suppressMessages(library(tidytext)))
+suppressWarnings(suppressMessages(library(RNewsflow)))
+suppressWarnings(suppressMessages(library(portfolio)))
+suppressWarnings(suppressMessages(library(jsonlite)))
+suppressWarnings(suppressMessages(library(readr)))
+```
+
+
+Different libraries were used to access tweets that required authentication and access rights. The project also accessed to AWS to store and read data. All the API keys and tokens were saved as environmental variables that were retrieved when necessary. 
+```{r}
+api_key <-  Sys.getenv('tweet_api_key')
+api_secret <- Sys.getenv('tweet_api_secret')
+token <- Sys.getenv('tweet_token')
+token_secret <- Sys.getenv('tweet_token_secret')
+
+#Create Twitter Connection
+setup_twitter_oauth(api_key, api_secret, token, token_secret)
+
+app <- Sys.getenv('tweet_app') 
+consumer_key <- Sys.getenv('tweet_consumer_key') 
+consumer_secret  <- Sys.getenv('tweet_consumer_secret') 
+
+twitter_token <- create_token(
+  app = app,
+  consumer_key = consumer_key,
+  consumer_secret = consumer_secret)
+```
+
+Using the function lookup_coords in the library 'rtweet'  bounding box coordinates of Howard county was collected. The coordinates would be used to filter tweets to find county specific tweets only. Most frequently used twitter accounts by County government were collected from the Howard County website (https://www.howardcountymd.gov/) 
+```{r}
+HCcoord <- lookup_coords("Howard County, MD", "country:US")
+
+HowardCounty_accounts <- c('HoCoGov','HoCoGovExec','HCPDNews','HCDFRS','HC_JonWeinstein','HoCoBOEMaryland','JenTerrasa')
+ 
+```
+
+Government twitter accounts were then used to find the associated twitter users and their followers (i.e.the citizens who have interests in government tweets) 
+```{r}
+hcUsers <- lookupUsers(HowardCounty_accounts)
+HCfollowers <- lapply(hcUsers,function(x) { usr <- x; followersCount(usr) })
+HCfollowersDF <- as.data.frame(HCfollowers)
+write.csv(HCfollowersDF, file = "HCfollowersDF.csv")
+
+
+
+```
+
+Functions were created to collect and evaluate citizens' tweets within the government. The first function "getGov_tweets" takes government accounts (government users) as its parameter and collect the  recents tweets sent out by each of those government accounts. It returns all those tweets in a data frame.  
+the second function "FindHashtags" take the output of the "getGov_tweets" function as its parameter and check all the hashtags used by government accounts. It returns the most common hashtags used by the government. All the hashtags are stored in a character variable seperated by "OR" so that they can be used to search tweets as a query parameter.
+
+```{r}
+
+getGov_tweets <- function (x) {
+  gdf <- c()
+  for(usr in x){
+    gvt <- userTimeline(x[1], n=150)
+    gvdf <- twListToDF(gvt)
+    gdf <- rbind(gdf,gvdf)
+
+     }
+  return(gdf)
+  
+}
+
+
+FindHashtags <- function(x) {
+  all_hashtags <- str_extract_all(x$text, "#\\w+")
+  DF <- as.data.frame(table(tolower(unlist(all_hashtags))))
+  mostUsedHashTags <- as.character(DF[order(-DF$Freq)[1:4],1])
+  mostUsedHashTags <- mostUsedHashTags[!is.na(mostUsedHashTags)] 
+  mostUsed_HashTags <- paste(mostUsedHashTags, sep="", collapse=" OR ") 
+  
+  return(mostUsed_HashTags)
+}
+```
+
+Collect Government tweets:
+```{r}
+HCgov_tweetDF <- getGov_tweets(hcUsers)
+write.csv(HCgov_tweetDF, file="HCgov_tweetDF.csv")
+```
+
+Collect citizen tweets:
+```{r}
+hocogov_hashtags = FindHashtags(HCgov_tweetDF)
+print(hocogov_hashtags)
+
+
+HowardCounty_genTweets <- search_tweets( hocogov_hashtags, n=2000, token=twitter_token, type = "mixed" )
+
+HowardCounty_genTweets1 <- HowardCounty_genTweets[,-c(14:28,40:42)]
+write.csv(HowardCounty_genTweets1, file="HCgen_tweetDF.csv")
+
+HCgovUsersid <- sapply(hcUsers,function(x) x$id )
+HCcitizens <- users_data(HowardCounty_genTweets)
+HCcitizens <- HCcitizens[!HCcitizens$location=="",]
+HCcitizens <- HCcitizens[!HCcitizens$user_id %in% HCgovUsersid,]
+
+write.csv(HCcitizens, file="HCcitizens.csv")
+
+```
+
+The intention of the project was also to be able to share data with other systems, particularly with GIS so that various spatial analysis could be done with the tweet data. Two seperate cloud based systems were explored. Tweet data  with location information were direcly stored to AWS (Amazon Web Service), which were consumed by ArcGIS online (an ESRI based cloud GIS) in order to analyze and visualuize data spatially in conjunction with other spatial data. Thus, all the changes could be updated and reflected across the systems real or near real time.
+
+While it was possible to geocode data in ESRI platform, the geocode capability of 'dismo' library was experimented with 'geocode' function, which uses Google API. Note that the geocode operation here was limited due to the restrictions on free version of Google API. The mapping capabilities in R (ggplot2) was also experimented, which was found to be very limited (see the commented out code snippet that was found in 'https://gist.github.com/dsparks/4329876' )
+
+```{r}
+#HowardCounty_citizensTweets1 <- filter(HowardCounty_genTweets, HowardCounty_genTweets$user_id %in% HCcitizens$user_id)
+
+locations <- geocode(HCcitizens$location) 
+locations <- na.omit(locations)
+locations <- filter(locations, !locations$longitude <  -77.18711 & !locations$longitude > -76.69732)
+write.csv(locations, file="locate2.csv")
+```
+Exporting data into AWS (using 'aws.s3'library), the file can be accessed by the following link: https://s3.amazonaws.com/khdata/locate.csv
+The below HTML snippet can be used to view the map that was created based on  locations data that was exported to AWS:
+
+```{r}
+b <- get_bucket("khdata")
+s3write_using(locations,FUN = write.csv, object = "locate.csv", bucket = b )
+```
+
